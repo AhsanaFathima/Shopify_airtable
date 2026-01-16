@@ -16,8 +16,6 @@ CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
 
 print("🏪 SHOP:", SHOP, flush=True)
-print("🔐 WEBHOOK_SECRET loaded:", bool(WEBHOOK_SECRET), flush=True)
-print("🔑 CLIENT_ID loaded:", bool(CLIENT_ID), flush=True)
 
 # ---------- TOKEN CACHE ----------
 SHOPIFY_TOKEN = None
@@ -44,32 +42,18 @@ def get_shopify_access_token():
     print("🔁 Token raw response:", res.text, flush=True)
 
     data = res.json()
-
     if not data.get("access_token"):
         raise Exception("❌ Token failed")
 
     SHOPIFY_TOKEN = data["access_token"]
     TOKEN_TIME = time.time()
-
     print("✅ Token received", flush=True)
     return SHOPIFY_TOKEN
 
-# ---------- MARKET MAPPING ----------
-MARKET_NAMES = {
-    "UAE": "United Arab Emirates",
-    "Asia": "Asia Market with 55 rate",
-    "America": "America catlog",
-}
-
-# ---------- CACHE ----------
-CACHED_PRICE_LISTS = None
-
 # ---------- HELPERS ----------
 def _json_headers():
-    token = get_shopify_access_token()
-    print("📡 Using token header", flush=True)
     return {
-        "X-Shopify-Access-Token": token,
+        "X-Shopify-Access-Token": get_shopify_access_token(),
         "Content-Type": "application/json",
     }
 
@@ -82,54 +66,16 @@ def _rest_url(path):
 def _to_number(x):
     try:
         return float(x) if x not in (None, "") else None
-    except Exception:
+    except:
         return None
 
 # ---------- GRAPHQL ----------
 def shopify_graphql(query, variables=None):
     print("📤 GraphQL Query:", query[:120], "...", flush=True)
-    resp = requests.post(
-        _graphql_url(),
-        headers=_json_headers(),
-        json={"query": query, "variables": variables},
-    )
-    print("📥 GraphQL status:", resp.status_code, flush=True)
-    resp.raise_for_status()
-    return resp.json()
-
-# ---------- PRICE LISTS ----------
-def get_market_price_lists():
-    global CACHED_PRICE_LISTS
-
-    if CACHED_PRICE_LISTS:
-        print("🔁 Using cached price lists", flush=True)
-        return CACHED_PRICE_LISTS
-
-    QUERY = """
-    query {
-      catalogs(first: 20, type: MARKET) {
-        nodes {
-          title
-          status
-          priceList { id currency }
-        }
-      }
-    }
-    """
-
-    res = shopify_graphql(QUERY)
-    price_lists = {}
-
-    for c in res.get("data", {}).get("catalogs", {}).get("nodes", []):
-        if c.get("status") == "ACTIVE" and c.get("priceList"):
-            price_lists[c["title"]] = {
-                "id": c["priceList"]["id"],
-                "currency": c["priceList"]["currency"],
-            }
-
-    print("📊 Price lists loaded:", price_lists, flush=True)
-    CACHED_PRICE_LISTS = price_lists
-    return price_lists
+    r = requests.post(_graphql_url(), headers=_json_headers(), json={"query": query, "variables": variables})
+    print("📥 GraphQL status:", r.status_code, flush=True)
+    r.raise_for_status()
+    return r.json()
 
 # ---------- VARIANT ----------
 def get_variant_product_and_inventory_by_sku(sku):
@@ -138,7 +84,7 @@ def get_variant_product_and_inventory_by_sku(sku):
     QUERY = """
     query ($q: String!) {
       productVariants(first: 1, query: $q) {
-        nodes { id }
+        nodes { id product { id } }
       }
     }
     """
@@ -147,176 +93,112 @@ def get_variant_product_and_inventory_by_sku(sku):
     nodes = res.get("data", {}).get("productVariants", {}).get("nodes", [])
 
     if not nodes:
-        print("❌ No variant found for SKU", sku, flush=True)
-        return None, None, None
+        return None, None, None, None
 
     variant_gid = nodes[0]["id"]
-    variant_id = variant_gid.split("/")[-1]
+    product_gid = nodes[0]["product"]["id"]
 
-    print("✅ Variant GID:", variant_gid, flush=True)
-    print("✅ Variant ID:", variant_id, flush=True)
+    variant_id = variant_gid.split("/")[-1]
+    product_id = product_gid.split("/")[-1]
 
     r = requests.get(_rest_url(f"variants/{variant_id}.json"), headers=_json_headers())
-    print("📥 Variant REST status:", r.status_code, flush=True)
     r.raise_for_status()
 
     inventory_item_id = r.json()["variant"]["inventory_item_id"]
-    print("📦 Inventory Item ID:", inventory_item_id, flush=True)
 
-    return variant_gid, variant_id, inventory_item_id
+    return variant_gid, variant_id, inventory_item_id, product_id
 
-# ---------- UPDATE PRICES ----------
+# ---------- UPDATE PRODUCT ----------
+def update_product_title(product_id, title):
+    if not title:
+        return
+    payload = {"product": {"id": int(product_id), "title": title}}
+    print("📝 Updating product title:", payload, flush=True)
+
+    r = requests.put(_rest_url(f"products/{product_id}.json"), headers=_json_headers(), json=payload)
+    print("📥 Product title response:", r.text, flush=True)
+    r.raise_for_status()
+
+# ---------- UPDATE VARIANT ----------
+def update_variant_barcode_and_size(variant_id, barcode, size):
+    payload = {"variant": {"id": int(variant_id)}}
+
+    if barcode:
+        payload["variant"]["barcode"] = barcode
+    if size:
+        payload["variant"]["option1"] = size
+
+    print("🏷 Updating variant barcode/size:", payload, flush=True)
+
+    r = requests.put(_rest_url(f"variants/{variant_id}.json"), headers=_json_headers(), json=payload)
+    print("📥 Variant response:", r.text, flush=True)
+    r.raise_for_status()
+
+# ---------- PRICE ----------
 def update_variant_default_price(variant_id, price, compare_price=None):
     payload = {"variant": {"id": int(variant_id), "price": str(price)}}
-    if compare_price is not None:
+    if compare_price:
         payload["variant"]["compare_at_price"] = str(compare_price)
 
-    print("💲 Updating default price payload:", payload, flush=True)
+    print("💲 Updating default price:", payload, flush=True)
 
-    res = requests.put(
-        _rest_url(f"variants/{variant_id}.json"),
-        headers=_json_headers(),
-        json=payload,
-    )
-
-    print("📥 Default price response:", res.text, flush=True)
-    res.raise_for_status()
-
-def update_price_list(price_list_id, variant_gid, price, currency, compare_price=None):
-    print(f"➡️ Updating price list {price_list_id}", flush=True)
-
-    price_input = {
-        "variantId": variant_gid,
-        "price": {"amount": str(price), "currencyCode": currency},
-    }
-
-    if compare_price is not None:
-        price_input["compareAtPrice"] = {
-            "amount": str(compare_price),
-            "currencyCode": currency,
-        }
-
-    MUTATION = """
-    mutation ($pl: ID!, $prices: [PriceListPriceInput!]!) {
-      priceListFixedPricesAdd(priceListId: $pl, prices: $prices) {
-        userErrors { message }
-      }
-    }
-    """
-
-    res = shopify_graphql(
-        MUTATION,
-        {"pl": price_list_id, "prices": [price_input]},
-    )
-
-    print("📥 Price list response:", res, flush=True)
+    r = requests.put(_rest_url(f"variants/{variant_id}.json"), headers=_json_headers(), json=payload)
+    print("📥 Default price response:", r.text, flush=True)
+    r.raise_for_status()
 
 # ---------- INVENTORY ----------
 def get_primary_location_id():
     r = requests.get(_rest_url("locations.json"), headers=_json_headers())
-    print("📥 Locations status:", r.status_code, flush=True)
     r.raise_for_status()
-    locations = r.json().get("locations", [])
-    if not locations:
-        raise RuntimeError("No Shopify locations found")
-    return locations[0]["id"]
+    return r.json()["locations"][0]["id"]
 
 def set_inventory_absolute(inventory_item_id, location_id, quantity):
-    print(f"📦 Updating stock → {quantity}", flush=True)
-
     payload = {
         "inventory_item_id": int(inventory_item_id),
         "location_id": int(location_id),
         "available": int(quantity),
     }
+    print("📦 Updating inventory:", payload, flush=True)
 
-    print("📤 Inventory payload:", payload, flush=True)
+    r = requests.post(_rest_url("inventory_levels/set.json"), headers=_json_headers(), json=payload)
+    print("📥 Inventory response:", r.text, flush=True)
+    r.raise_for_status()
 
-    res = requests.post(
-        _rest_url("inventory_levels/set.json"),
-        headers=_json_headers(),
-        json=payload,
-    )
-
-    print("📥 Inventory response:", res.text, flush=True)
-    res.raise_for_status()
-
-# ---------- ROUTES ----------
-@app.route("/", methods=["GET"])
-def home():
-    return "✅ Airtable → Shopify Sync is running", 200
-
+# ---------- ROUTE ----------
 @app.route("/airtable-webhook", methods=["POST"])
 def airtable_webhook():
     print("\n🔔 WEBHOOK HIT", flush=True)
 
-    print("🔐 Header token:", request.headers.get("X-Secret-Token"), flush=True)
-    print("🔐 Env token:", WEBHOOK_SECRET, flush=True)
-
     if (request.headers.get("X-Secret-Token") or "").strip() != WEBHOOK_SECRET:
-        print("❌ Unauthorized webhook", flush=True)
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.json or {}
     print("📦 Payload:", data, flush=True)
 
     sku = data.get("SKU")
-
-    prices = {
-        "UAE": _to_number(data.get("UAE price")),
-        "Asia": _to_number(data.get("Asia Price")),
-        "America": _to_number(data.get("America Price")),
-    }
-
-    compare_prices = {
-        "UAE": _to_number(data.get("UAE Comparison Price")),
-        "Asia": _to_number(data.get("Asia Comparison Price")),
-        "America": _to_number(data.get("America Comparison Price")),
-    }
-
-    qty = _to_number(data.get("Qty given in shopify"))
-
-    print("🧾 Parsed prices:", prices, flush=True)
-    print("🧾 Parsed compares:", compare_prices, flush=True)
-    print("🧾 Qty:", qty, flush=True)
-
     if not sku:
         return jsonify({"error": "SKU missing"}), 400
 
-    variant_gid, variant_id, inventory_item_id = get_variant_product_and_inventory_by_sku(sku)
+    variant_gid, variant_id, inventory_item_id, product_id = get_variant_product_and_inventory_by_sku(sku)
     if not variant_gid:
         return jsonify({"error": "Variant not found"}), 404
 
-    if prices["UAE"] is not None:
-        update_variant_default_price(
-            variant_id,
-            prices["UAE"],
-            compare_prices["UAE"]
-        )
+    # --- TEXT UPDATES ---
+    update_product_title(product_id, data.get("Title"))
+    update_variant_barcode_and_size(variant_id, data.get("Barcode"), data.get("Size"))
 
+    # --- PRICE ---
+    update_variant_default_price(
+        variant_id,
+        _to_number(data.get("UAE price")),
+        _to_number(data.get("UAE Comparison Price"))
+    )
+
+    # --- INVENTORY ---
+    qty = _to_number(data.get("Qty given in shopify"))
     if qty is not None:
-        location_id = get_primary_location_id()
-        set_inventory_absolute(inventory_item_id, location_id, qty)
-
-    price_lists = get_market_price_lists()
-
-    for market, price in prices.items():
-        if price is None:
-            continue
-
-        pl = price_lists.get(MARKET_NAMES.get(market))
-        print(f"🌍 Market {market} → PriceList:", pl, flush=True)
-
-        if not pl:
-            continue
-
-        update_price_list(
-            pl["id"],
-            variant_gid,
-            price,
-            pl["currency"],
-            compare_prices.get(market)
-        )
+        loc = get_primary_location_id()
+        set_inventory_absolute(inventory_item_id, loc, qty)
 
     print("🎉 SYNC COMPLETE", flush=True)
     return jsonify({"status": "success"}), 200
