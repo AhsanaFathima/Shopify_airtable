@@ -118,12 +118,8 @@ def webhook():
     data = request.json
     print("Payload received:", data)
 
-    # ---- Airtable inputs ----
-    product_id = data.get("product_id")
-    title = data.get("title")
     sku = data.get("sku")
-    barcode = data.get("barcode")
-    size = data.get("size")
+    title = data.get("title")
     quantity = data.get("quantity")
 
     uae_price = data.get("uae_price")
@@ -134,32 +130,26 @@ def webhook():
     asia_compare = data.get("asia_compare_price")
     america_compare = data.get("america_compare_price")
 
-    print("Product ID:", product_id)
-    print("SKU:", sku)
-    print("Barcode:", barcode)
-    print("Size:", size)
-    print("Quantity:", quantity)
+    print("🔍 Searching variant by SKU:", sku)
 
-    # ---- Fetch product ----
-    print("Fetching product from Shopify...")
+    search_url = f"https://{SHOP}.myshopify.com/admin/api/2025-01/variants.json?sku={sku}"
+    res = requests.get(search_url, headers=get_headers())
 
-    product_url = f"https://{SHOP}.myshopify.com/admin/api/2025-01/products/{product_id}.json"
-    product_data = requests.get(product_url, headers=get_headers()).json()
+    print("Variant search response:", res.text)
 
-    variant_id = None
+    variants = res.json().get("variants", [])
 
-    for v in product_data["product"]["variants"]:
-        print("Checking variant SKU:", v["sku"])
-        if v["sku"] == sku:
-            variant_id = v["id"]
-
-    if not variant_id:
-        print("❌ Variant not found")
+    if not variants:
+        print("❌ Variant not found for SKU:", sku)
         return jsonify({"error": "Variant not found"}), 400
 
-    print("✅ Variant found:", variant_id)
+    variant = variants[0]
+    variant_id = variant["id"]
+    product_id = variant["product_id"]
 
-    # ---- Shopify Updates ----
+    print("✅ Variant ID:", variant_id)
+    print("✅ Product ID:", product_id)
+
     update_product(product_id, title)
     update_variant_inventory(variant_id, quantity)
 
