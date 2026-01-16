@@ -1,5 +1,6 @@
 import os
 import requests
+import time
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -8,9 +9,46 @@ print("🚀 Flask app starting...", flush=True)
 
 # ---------- ENV ----------
 SHOP = os.getenv("SHOPIFY_SHOP")
-TOKEN = os.getenv("SHOPIFY_API_TOKEN")
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-07")
+
+CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID")
+CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
+
+# ---------- TOKEN CACHE ----------
+SHOPIFY_TOKEN = None
+TOKEN_TIME = 0
+
+def get_shopify_access_token():
+    global SHOPIFY_TOKEN, TOKEN_TIME
+
+    if SHOPIFY_TOKEN and time.time() - TOKEN_TIME < 3000:
+        print("🔁 Using cached Shopify token", flush=True)
+        return SHOPIFY_TOKEN
+
+    print("🔐 Requesting Shopify access token...", flush=True)
+
+    url = f"https://{SHOP}/admin/oauth/access_token"
+
+    payload = {
+        "client_id": CLIENT_ID,
+        "client_secret": CLIENT_SECRET,
+        "grant_type": "client_credentials"
+    }
+
+    res = requests.post(url, json=payload)
+    print("🔁 Token raw response:", res.text, flush=True)
+
+    data = res.json()
+
+    if not data.get("access_token"):
+        raise Exception("❌ Token failed")
+
+    SHOPIFY_TOKEN = data["access_token"]
+    TOKEN_TIME = time.time()
+
+    print("✅ Token received", flush=True)
+    return SHOPIFY_TOKEN
 
 # ---------- MARKET MAPPING ----------
 MARKET_NAMES = {
@@ -25,7 +63,7 @@ CACHED_PRICE_LISTS = None
 # ---------- HELPERS ----------
 def _json_headers():
     return {
-        "X-Shopify-Access-Token": TOKEN,
+        "X-Shopify-Access-Token": get_shopify_access_token(),
         "Content-Type": "application/json",
     }
 
@@ -109,7 +147,7 @@ def get_variant_product_and_inventory_by_sku(sku):
     inventory_item_id = r.json()["variant"]["inventory_item_id"]
     return variant_gid, variant_id, inventory_item_id
 
-# ---------- UPDATE PRICES (UNCHANGED) ----------
+# ---------- UPDATE PRICES ----------
 def update_variant_default_price(variant_id, price, compare_price=None):
     payload = {"variant": {"id": int(variant_id), "price": str(price)}}
     if compare_price is not None:
@@ -124,10 +162,7 @@ def update_variant_default_price(variant_id, price, compare_price=None):
     ).raise_for_status()
 
 def update_price_list(price_list_id, variant_gid, price, currency, compare_price=None):
-    print(
-        f"➡️ Updating price list {price_list_id} → price={price}, compare={compare_price}",
-        flush=True
-    )
+    print(f"➡️ Updating price list {price_list_id}", flush=True)
 
     price_input = {
         "variantId": variant_gid,
@@ -153,7 +188,7 @@ def update_price_list(price_list_id, variant_gid, price, currency, compare_price
         {"pl": price_list_id, "prices": [price_input]},
     )
 
-# ---------- INVENTORY (FIXED & ADDED) ----------
+# ---------- INVENTORY ----------
 def get_primary_location_id():
     r = requests.get(_rest_url("locations.json"), headers=_json_headers())
     r.raise_for_status()
@@ -210,7 +245,6 @@ def airtable_webhook():
     if not variant_gid:
         return jsonify({"error": "Variant not found"}), 404
 
-    # UAE default price
     if prices["UAE"] is not None:
         update_variant_default_price(
             variant_id,
@@ -218,14 +252,12 @@ def airtable_webhook():
             compare_prices["UAE"]
         )
 
-    # STOCK UPDATE ✅
     if qty is not None:
         location_id = get_primary_location_id()
         set_inventory_absolute(inventory_item_id, location_id, qty)
 
     price_lists = get_market_price_lists()
 
-    # Market price lists
     for market, price in prices.items():
         if price is None:
             continue
