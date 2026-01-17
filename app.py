@@ -9,14 +9,10 @@ print("🚀 Flask app starting...", flush=True)
 
 # ---------- ENV ----------
 SHOP = os.getenv("SHOPIFY_SHOP")
-
 CLIENT_ID = os.getenv("SHOPIFY_CLIENT_ID")
 CLIENT_SECRET = os.getenv("SHOPIFY_CLIENT_SECRET")
-
 WEBHOOK_SECRET = os.getenv("WEBHOOK_SECRET")
 API_VERSION = os.getenv("SHOPIFY_API_VERSION", "2024-07")
-
-print("🏪 SHOP:", SHOP, flush=True)
 
 # ---------- TOKEN CACHE ----------
 SHOPIFY_TOKEN = None
@@ -71,7 +67,7 @@ def _to_number(x):
     except:
         return None
 
-# ---------- MARKET MAPPING ----------
+# ---------- MARKET ----------
 MARKET_NAMES = {
     "UAE": "United Arab Emirates",
     "Asia": "Asia Market with 55 rate",
@@ -128,7 +124,7 @@ def get_variant_product_and_inventory_by_sku(sku):
     QUERY = """
     query ($q: String!) {
       productVariants(first: 1, query: $q) {
-        nodes { id }
+        nodes { id product { id } }
       }
     }
     """
@@ -137,16 +133,18 @@ def get_variant_product_and_inventory_by_sku(sku):
     nodes = res.get("data", {}).get("productVariants", {}).get("nodes", [])
 
     if not nodes:
-        return None, None, None
+        return None, None, None, None
 
     variant_gid = nodes[0]["id"]
+    product_gid = nodes[0]["product"]["id"]
     variant_id = variant_gid.split("/")[-1]
 
     r = requests.get(_rest_url(f"variants/{variant_id}.json"), headers=_json_headers())
     r.raise_for_status()
 
     inventory_item_id = r.json()["variant"]["inventory_item_id"]
-    return variant_gid, variant_id, inventory_item_id
+
+    return variant_gid, product_gid, variant_id, inventory_item_id
 
 # ---------- UPDATE PRICES ----------
 def update_variant_default_price(variant_id, price, compare_price=None):
@@ -192,6 +190,7 @@ def get_primary_location_id():
     return r.json()["locations"][0]["id"]
 
 def set_inventory_absolute(inventory_item_id, location_id, quantity):
+    print("📦 Updating inventory:", quantity, flush=True)
     requests.post(
         _rest_url("inventory_levels/set.json"),
         headers=_json_headers(),
@@ -201,6 +200,55 @@ def set_inventory_absolute(inventory_item_id, location_id, quantity):
             "available": int(quantity),
         },
     ).raise_for_status()
+
+# ---------- TITLE / BARCODE ----------
+def update_variant_details(variant_gid, title=None, barcode=None):
+    if not (title or barcode):
+        return
+
+    var_num = variant_gid.split("/")[-1]
+    url = _rest_url(f"variants/{var_num}.json")
+
+    payload = {"variant": {"id": int(var_num)}}
+    if title:
+        payload["variant"]["title"] = title
+    if barcode:
+        payload["variant"]["barcode"] = barcode
+
+    print("✏ Updating variant details:", payload, flush=True)
+    requests.put(url, headers=_json_headers(), json=payload).raise_for_status()
+
+def update_product_title(product_gid, title):
+    pid = product_gid.split("/")[-1]
+    url = _rest_url(f"products/{pid}.json")
+
+    payload = {"product": {"id": int(pid), "title": title}}
+
+    print("✏ Updating product title:", payload, flush=True)
+    requests.put(url, headers=_json_headers(), json=payload).raise_for_status()
+
+# ---------- METAFIELD ----------
+def set_metafield(owner_id_gid, namespace, key, mtype, value):
+    MUT = """
+    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
+      metafieldsSet(metafields: $metafields) {
+        userErrors { message }
+      }
+    }
+    """
+
+    variables = {
+        "metafields": [{
+            "ownerId": owner_id_gid,
+            "namespace": namespace,
+            "key": key,
+            "type": mtype,
+            "value": str(value)
+        }]
+    }
+
+    print("🧩 Setting metafield:", namespace, key, value, flush=True)
+    shopify_graphql(MUT, variables)
 
 # ---------- ROUTES ----------
 @app.route("/", methods=["GET"])
@@ -214,7 +262,12 @@ def airtable_webhook():
         return jsonify({"error": "Unauthorized"}), 401
 
     data = request.json or {}
+    print("📦 Payload:", data, flush=True)
+
     sku = data.get("SKU")
+    title = data.get("Title")
+    barcode = data.get("Barcode")
+    size_value = data.get("Size")
 
     prices = {
         "UAE": _to_number(data.get("UAE price")),
@@ -233,18 +286,38 @@ def airtable_webhook():
     if not sku:
         return jsonify({"error": "SKU missing"}), 400
 
-    variant_gid, variant_id, inventory_item_id = get_variant_product_and_inventory_by_sku(sku)
+    variant_gid, product_gid, variant_id, inventory_item_id = get_variant_product_and_inventory_by_sku(sku)
 
     if not variant_gid:
         return jsonify({"error": "Variant not found"}), 404
 
+    # ---- TITLE / BARCODE ----
+    if title or barcode:
+        update_variant_details(variant_gid, title, barcode)
+
+    if title:
+        update_product_title(product_gid, title)
+
+    # ---- SIZE ----
+    if size_value:
+        set_metafield(
+            variant_gid,
+            "custom",
+            "size",
+            "single_line_text_field",
+            size_value
+        )
+
+    # ---- PRICE ----
     if prices["UAE"] is not None:
         update_variant_default_price(variant_id, prices["UAE"], compare_prices["UAE"])
 
+    # ---- INVENTORY ----
     if qty is not None:
-        location_id = get_primary_location_id()
-        set_inventory_absolute(inventory_item_id, location_id, qty)
+        loc = get_primary_location_id()
+        set_inventory_absolute(inventory_item_id, loc, qty)
 
+    # ---- PRICE LISTS ----
     price_lists = get_market_price_lists()
 
     for market, price in prices.items():
@@ -257,6 +330,7 @@ def airtable_webhook():
 
         update_price_list(pl["id"], variant_gid, price, pl["currency"], compare_prices.get(market))
 
+    print("🎉 SYNC COMPLETE", flush=True)
     return jsonify({"status": "success"}), 200
 
 # ---------- RUN ----------
