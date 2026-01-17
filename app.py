@@ -146,7 +146,7 @@ def get_variant_product_and_inventory_by_sku(sku):
 
     return variant_gid, product_gid, variant_id, inventory_item_id
 
-# ---------- UPDATE PRICES ----------
+# ---------- PRICE ----------
 def update_variant_default_price(variant_id, price, compare_price=None):
     payload = {"variant": {"id": int(variant_id), "price": str(price)}}
 
@@ -298,10 +298,10 @@ def airtable_webhook():
     if title:
         update_product_title(product_gid, title)
 
-    # ---- SIZE ----
-    if size_value:
+    # ---- SIZE (PRODUCT METAFIELD) ----
+    if size_value is not None and str(size_value).strip():
         set_metafield(
-            variant_gid,
+            product_gid,        # ✅ PRODUCT metafield
             "custom",
             "size",
             "single_line_text_field",
