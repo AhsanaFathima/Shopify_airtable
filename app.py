@@ -108,62 +108,31 @@ def get_variant_product_and_inventory_by_sku(sku):
 
     return variant_gid, variant_id, inventory_item_id, product_id
 
-#------------ UPDATE BARCODE-------------------
-def update_variant_details(variant_gid, title=None, barcode=None):
-    if not (title or barcode):
-        return None
-    var_num = variant_gid.split("/")[-1]
-    url = _rest_url(f"variants/{var_num}.json")
-    vdata = {"id": int(var_num)}
-    if title:   vdata["title"] = title
-    if barcode: vdata["barcode"] = barcode
-    payload = {"variant": vdata}
-    print(f"[REST] PUT variant details {url} payload={payload}", flush=True)
-    resp = requests.put(url, headers=_json_headers(), json=payload)
-    print("[REST] variant details resp:", resp.status_code, resp.text, flush=True)
-    resp.raise_for_status()
-    return resp.json()
+# ---------- UPDATE PRODUCT ----------
+def update_product_title(product_id, title):
+    if not title:
+        return
+    payload = {"product": {"id": int(product_id), "title": title}}
+    print("📝 Updating product title:", payload, flush=True)
 
-# ---------- UPDATE PRODUCT TITLE ----------
-def update_product_title(product_gid, new_title):
-    pid = product_gid.split("/")[-1]
-    url = _rest_url(f"products/{pid}.json")
-    payload = {"product": {"id": int(pid), "title": new_title}}
-    print(f"[REST] PUT product title {url} payload={payload}", flush=True)
-    resp = requests.put(url, headers=_json_headers(), json=payload)
-    print("[REST] product title resp:", resp.status_code, resp.text, flush=True)
-    resp.raise_for_status()
-    return resp.json()
+    r = requests.put(_rest_url(f"products/{product_id}.json"), headers=_json_headers(), json=payload)
+    print("📥 Product title response:", r.text, flush=True)
+    r.raise_for_status()
 
+# ---------- UPDATE VARIANT ----------
+def update_variant_barcode_and_size(variant_id, barcode, size):
+    payload = {"variant": {"id": int(variant_id)}}
 
-# ---------- Metafields ----------
-def set_metafield(owner_id_gid, namespace, key, mtype, value):
-    METAFIELDS_SET = """
-    mutation metafieldsSet($metafields: [MetafieldsSetInput!]!) {
-      metafieldsSet(metafields: $metafields) {
-        metafields { id namespace key type value }
-        userErrors { field message }
-      }
-    }
-    """
-    variables = {
-        "metafields": [{
-            "ownerId": owner_id_gid,
-            "namespace": namespace,
-            "key": key,
-            "type": mtype,
-            "value": str(value)
-        }]
-    }
-    print(f"Setting metafield {namespace}.{key}={value} on {owner_id_gid}", flush=True)
-    result = shopify_graphql(METAFIELDS_SET, variables)
-    try:
-        errs = result["data"]["metafieldsSet"]["userErrors"]
-        if errs:
-            print("Metafield userErrors:", errs, flush=True)
-    except Exception as e:
-        print("Error reading metafield userErrors:", e, flush=True)
-    return result
+    if barcode:
+        payload["variant"]["barcode"] = barcode
+    if size:
+        payload["variant"]["option1"] = size
+
+    print("🏷 Updating variant barcode/size:", payload, flush=True)
+
+    r = requests.put(_rest_url(f"variants/{variant_id}.json"), headers=_json_headers(), json=payload)
+    print("📥 Variant response:", r.text, flush=True)
+    r.raise_for_status()
 
 # ---------- PRICE ----------
 def update_variant_default_price(variant_id, price, compare_price=None):
@@ -214,7 +183,10 @@ def airtable_webhook():
     if not variant_gid:
         return jsonify({"error": "Variant not found"}), 404
 
-    
+    # --- TEXT UPDATES ---
+    update_product_title(product_id, data.get("Title"))
+    update_variant_barcode_and_size(variant_id, data.get("Barcode"), data.get("Size"))
+
     # --- PRICE ---
     update_variant_default_price(
         variant_id,
@@ -227,8 +199,6 @@ def airtable_webhook():
     if qty is not None:
         loc = get_primary_location_id()
         set_inventory_absolute(inventory_item_id, loc, qty)
-
-    
 
     print("🎉 SYNC COMPLETE", flush=True)
     return jsonify({"status": "success"}), 200
